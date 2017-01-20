@@ -7,12 +7,14 @@ use 5.010001;
 use Moose;
 use namespace::autoclean;
 
-use Carp qw(croak);
+use Carp;
 
 use Algorithm::QuineMcCluskey::Util qw(:all);
 use List::MoreUtils qw(uniq);
-use List::Compare::Functional qw(get_complement get_intersection is_LequivalentR);
+use List::Compare::Functional qw(get_complement is_LequivalentR);
 use Tie::Cycle;
+
+extends 'Logic::Minimizer';
 
 #
 # Vaguely consistent Smart-Comment rules:
@@ -21,60 +23,25 @@ use Tie::Cycle;
 # 4 pound signs for code that manipulates prime/essentials/covers hashes:
 #      row_dominance().
 #
-# 5 pound signs for the solve() and recurse_solve() code, and the remels() calls.
+# 5 pound signs for the solve() and recurse_solve() code, and the remels()
+# calls.
 #
 # The ::Format package is only needed for Smart Comments -- comment or uncomment
 # in concert with Smart::Comments as needed.
 #
-#use Algorithm::QuineMcCluskey::Format qw(arrayarray hasharray chart);
-#use Smart::Comments ('###');
+use Algorithm::QuineMcCluskey::Format qw(arrayarray hasharray chart);
+use Smart::Comments ('###', '#####');
 
 #
-# Required attributes to create the object.
+# Attributes inherited from Logic::Minimizer are width, minterms, maxterms,
+# dontcares, columnstring, dc, primes, essentials, and covers.
 #
-# 1. 'width' is absolutely required (handled via Moose).
-#
-# 2. If 'columnstring' is provided, 'minterms', 'maxterms', and
-#    'dontcares' can't be used.
-#
-# 3. Either 'minterms' or 'maxterms' is used, but not both.
-#
-# 4. 'dontcares' are used with either 'minterms' or 'maxterms', but
-#    cannot be used by itself.
-#
-has 'width'	=> (
-	isa => 'Int', is => 'ro', required => 1
-);
-
-has 'minterms'	=> (
-	isa => 'ArrayRef[Int]', is => 'rw', required => 0,
-	predicate => 'has_minterms'
-);
-has 'maxterms'	=> (
-	isa => 'ArrayRef[Int]', is => 'rw', required => 0,
-	predicate => 'has_maxterms'
-);
-has 'dontcares'	=> (
-	isa => 'ArrayRef[Int]', is => 'rw', required => 0,
-	predicate => 'has_dontcares'
-);
-has 'columnstring'	=> (
-	isa => 'Str', is => 'ro', required => 0,
-	predicate => 'has_columnstring',
-	lazy => 1,
-	builder => 'to_columnstring'
-);
-
 #
 # Optional attributes.
 #
 has 'title'	=> (
 	isa => 'Str', is => 'rw', required => 0,
 	predicate => 'has_title'
-);
-has 'dc'	=> (
-	isa => 'Str', is => 'rw',
-	default => '-'
 );
 has 'vars'	=> (
 	isa => 'ArrayRef[Str]', is => 'rw', required => 0,
@@ -119,54 +86,7 @@ has 'max_bits'	=> (
 # to, and final form of, the solution to the equation) are all "lazy"
 # attributes and calculated when asked for in code or by the user.
 #
-
-#
-# The calculated prime implicants.
-#
-has 'primes'	=> (
-	isa => 'HashRef', is => 'ro', required => 0,
-	init_arg => undef,
-	reader => 'get_primes',
-	writer => '_set_primes',
-	predicate => 'has_primes',
-	clearer => 'clear_primes',
-	lazy => 1,
-	builder => 'generate_primes'
-);
-
-#
-# The essential prime implicants (not actually
-# used in the algorithm, we keep track of what's
-# essential in a list local to the recursive
-# solving function).
-#
-has 'essentials'	=> (
-	isa => 'ArrayRef', is => 'ro', required => 0,
-	init_arg => undef,
-	reader => 'get_essentials',
-	writer => '_set_essentials',
-	predicate => 'has_essentials',
-	clearer => 'clear_essentials',
-	lazy => 1,
-	builder => 'generate_essentials'
-);
-
-#
-# The terms that cover the primes needed to solve the
-# truth table.
-#
-has 'covers'	=> (
-	isa => 'ArrayRef[ArrayRef[Str]]', is => 'ro', required => 0,
-	init_arg => undef,
-	reader => 'get_covers',
-	writer => '_set_covers',
-	predicate => 'has_covers',
-	clearer => 'clear_covers',
-	lazy => 1,
-	builder => 'generate_covers'
-);
-
-our $VERSION = 0.13;
+our $VERSION = 0.14;
 
 sub BUILD
 {
@@ -178,69 +98,7 @@ sub BUILD
 	#
 	# Catch errors involving minterms, maxterms, and don't-cares.
 	#
-	croak "Mixing minterms and maxterms not allowed"
-		if ($self->has_minterms and $self->has_maxterms);
-
-	if ($self->has_columnstring)
-	{
-		croak "No other terms necessary when using the columnstring attribute"
-			if ($self->has_minterms or $self->has_maxterms or $self->has_dontcares);
-
-		my $cl = $last_idx + 1 - length $self->columnstring;
-
-		croak "Columnstring length is too short by ", $cl if ($cl > 0);
-		croak "Columnstring length is too long by ", -$cl if ($cl < 0);
-	}
-	else
-	{
-		if ($self->has_minterms)
-		{
-			@terms = @{$self->minterms};
-		}
-		elsif ($self->has_maxterms)
-		{
-			@terms = @{$self->maxterms};
-		}
-		else
-		{
-			croak "Must supply either minterms or maxterms";
-		}
-
-		if ($self->has_dontcares)
-		{
-			my @intersect = get_intersection([$self->dontcares, \@terms]);
-			if (scalar @intersect != 0)
-			{
-				croak "Term(s) ", join(", ", @intersect),
-					" are in both the don't-care list and the term list.";
-			}
-
-			push @terms, @{$self->dontcares};
-		}
-
-		#
-		# Can those terms be expressed in 'width' bits?
-		#
-		my @outside = grep {$_ > $last_idx or $_ < 0} @terms;
-
-		if (scalar @outside)
-		{
-			croak "Terms (" . join(", ", @outside) . ") are larger than $w bits";
-		}
-	}
-
-	#
-	# Do we really need to check if they've set the
-	# don't-care character to '0' or '1'? Oh well...
-	#
-	croak "Don't-care must be a single character" if (length $self->dc != 1);
-	croak "The don't-care character can not be '0' or '1'" if ($self->dc =~ qr([01]));
-
-	#
-	# Make sure we have enough variable names, and limit them to the width.
-	#
-	croak "Not enough variable names for your width" if (scalar @{$self->vars} < $w);
-	$self->vars([ @{$self->vars}[0 .. $w-1] ]);
+	$self->catch_errors();
 
 	#
 	# We've gotten past the error-checking. Create the object.
@@ -295,54 +153,6 @@ sub BUILD
 	$self->title("$w-variable truth table") unless ($self->has_title);
 
 	return $self;
-}
-
-#
-# Return a string made up of the function column. Position 0 in the string is
-# the 0th row of the column, and so on.
-#
-sub to_columnstring
-{
-	my $self = shift;
-	my ($dfltbit, $setbit) = ($self->has_min_bits)? qw(0 1): qw(1 0);
-	my @bitlist = ($dfltbit) x (1 << $self->width);
-
-	my @terms;
-
-	push @terms, @{$self->minterms} if ($self->has_minterms);
-	push @terms, @{$self->maxterms} if ($self->has_maxterms);
-
-	map {$bitlist[$_] = $setbit} @terms;
-
-	if ($self->has_dontcares)
-	{
-		map {$bitlist[$_] = $self->dc} (@{ $self->dontcares});
-	}
-
-	return join "", @bitlist;
-}
-
-#
-# Take a column string and return array refs usable as parameters for
-# minterm, maxterm, and don't-care attributes.
-#
-sub break_columnstring
-{
-	my $self = shift;
-	my @bitlist = split(//, $self->columnstring);
-	my $x = 0;
-
-	my(@maxterms, @minterms, @dontcares);
-
-	for (@bitlist)
-	{
-		push @minterms, $x if ($_ eq '1');
-		push @maxterms, $x if ($_ eq '0');
-		push @dontcares, $x if ($_ eq $self->dc);
-		$x++;
-	}
-
-	return (\@minterms, \@maxterms, \@dontcares);
 }
 
 sub complement_terms
@@ -588,8 +398,6 @@ sub to_boolean
 	my $w = $self->width;
 
 	#
-	### to_boolean() called with: arrayarray([$cref])
-	#
 	# Group separators (grouping character pairs)
 	#
 	my($gsb, $gse) = ('(', ')');
@@ -600,6 +408,19 @@ sub to_boolean
 	#
 	my $gj = $is_sop ? ' + ': '';
 
+	#
+	# Check for an undefined reference (shouldn't be happening,
+	# but has).
+	#
+	unless (defined $cref)
+	{
+		carp "Undefined covers reference";
+		return $gsb . $gse;
+	}
+
+	#
+	### to_boolean() called with: arrayarray([$cref])
+	#
 	my @covers = @$cref;
 
 	#
@@ -612,7 +433,7 @@ sub to_boolean
 	#
 	if ($#covers == 0 and $covers[0] =~ /[^01]{$w}/)
 	{
-		return ($is_sop)? "(1)": "(0)";
+		return $gsb . (($is_sop)? "1": "0") . $gse;
 	}
 
 	@covers = sort @covers if ($self->order_by eq 'covers');
@@ -635,11 +456,11 @@ sub to_boolean_term
 	# Element joiner and match condition
 	#
 	my($ej, $cond) = $is_sop ? ('', 1) : (' + ', 0);
-	tie my $var, 'Tie::Cycle', [ @{$self->vars} ];
+	tie my $vars, 'Tie::Cycle', [ @{$self->vars} ];
 
 	my $varstring = join $ej, map {
-			my $var = $var;	# Activate cycle even if not used
-			$_ eq $self->dc ? () : $var . ($_ == $cond ? '' : "'")
+			my $v = $vars;	# Activate cycle even if not used
+			$_ eq $self->dc ? () : $v . ($_ == $cond ? '' : "'")
 		} split(//, $term);
 
 	return $varstring;
