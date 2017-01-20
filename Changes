@@ -1,5 +1,14 @@
 Revision history for Algorithm-QuineMcCluskey
 
+1.00
+     2017-01-24
+	- We now use Logic::Minimizer as a base class.
+	- Consequently, removed attributes and methods that are
+	  now copied in Logic::Minimizer, and are provided
+	  automatically.
+	- Use L::M's catch_errors() for attribute validation.
+	- Update Build.PL with Logic::Minimizer requirement.
+	- And updated the version number everywhere.
 0.14
      2017-01-19
 	- Had set the weed-out-expensive-solutions cost at the start of
